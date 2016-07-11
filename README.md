@@ -7,7 +7,7 @@ tpldata_live110716.zip.001
 tpldata_live110716.zip.002
 tpldata_live110716.zip.003
 
-# tpl.pm
+# Tpl.pm
 Collection of reusable functions
 
 # tplNameCheck.pl
