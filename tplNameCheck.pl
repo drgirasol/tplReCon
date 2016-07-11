@@ -38,7 +38,7 @@ $csv->eol ("\n");
 #       Taxonomic Status Overview
 #
 my $outFile = $testFile."_TPL_NameCheck.csv";
-my @csv_header = ("Family","Genus","Taxon","SourceId","Status","Exception","Additionals");
+my @csv_header = ("Family","Genus","Taxon","SourceId","Status","Additionals");
 my $csvHeaderRef = \@csv_header;
 open my $fh, ">:encoding(utf8)", $outFile or die "$outFile $!";
 $csv->print ($fh, $csvHeaderRef);
@@ -139,14 +139,13 @@ while (my $line = <$data2>) {
                    }
                 }
             }
-
          } else
          {
             print colored("NA", 'bold red on_black');
          }
       }
       print "\n";
-      my @columns = ($family,$tplEntry->{genus},$taxon,$tax{"SourceId"},$tax{"Status"},$tax{"Exception"});
+      my @columns = ($family,$tplEntry->{genus},$taxon,$tax{"SourceId"},$tax{"Status"});
       push(@columns, @lineSplits);
       $csv->print ($fh, \@columns);
       if (@{$ambNames{Accepted}} > 0 || @{$ambNames{Synonym}} > 0 || @{$ambNames{Unresolved}} > 0 || @{$ambNames{Misapplied}} > 0)
