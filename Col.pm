@@ -15,10 +15,10 @@ use File::Slurp;
 our @ISA= qw( Exporter );
 
 # these CAN be exported.
-our @EXPORT_OK = qw( colTaxa colStatus colHierarchy);
+our @EXPORT_OK = qw( colReCon );
 
 # these are exported by default.
-our @EXPORT = qw( colTaxa colStatus colHierarchy);
+our @EXPORT = qw( colReCon );
 
 sub taxon2words {
     #
@@ -152,11 +152,79 @@ sub isIdentical {
     }
     return (0,$contextTaxon);
 }
+sub loadColDetails
+{
+    my $json = shift(@_);
+    my $taxon = shift(@_);    # TPL entry
+    my $taxonName = shift(@_);
+    my $response = "full";
+    
+    my $cwd = getcwd();
+    my $jsonDir = $cwd."/CoL_DATA";
+    unless(-e $jsonDir)
+    {
+        mkdir($jsonDir) or die "Error ($!) creating CoL JSON directory";
+    }    
+    my $fileName;
+    if ($taxon->{infraspecificEpithet} eq "")
+    {
+        $fileName = $taxon->{genus};
+    } else
+    {
+        $fileName = join(" ", ($taxon->{genus}, $taxon->{species}));
+    }
+    $fileName =~ s/\s/\_/g;
+    $fileName =~ s/\_+$//;
+    $fileName =~ s/\.$//;
+    my $dataFile = "CoL_DATA/$fileName-$response.json";        
+        
+    my $detailJson;    
+    
+    if (-e $dataFile)
+    {
+        # load data from xml file
+        print "\n\t\tReading JSON from File: ";
+        my $jsonText = read_file($dataFile);        
+        $detailJson = decode_json($jsonText);        
+    } else
+    {
+        if (@{$json->{results}} > 0)
+        {
+            print "\n\t\tRequesting taxa details from Catalouge of Life";
+            $detailJson = [];
+            foreach my $item (@{$json->{results}})
+            {                        
+                print ".";
+                my $wj = WWW::JSON->new(
+                    base_url                   => 'http://www.catalogueoflife.org',
+                    post_body_format           => 'JSON'            
+                );
+                my $get = $wj->get(
+                    '/col/webservice',
+                    {
+                        id       => $item->{id},
+                        format   => 'json',
+                        response => $response
+                    }
+                );
+                if ($get->success)
+                {
+                    push($detailJson, $get->response->{results}[0]);
+                }        
+            }
+            open my $df, ">", $dataFile or die "$dataFile $!";
+            print $df encode_json $detailJson;
+            print "Saved File $dataFile\n";                  
+        }
+        
+    }
+    return $detailJson;    
+}
 sub loadColData 
 {
     my $taxon = shift(@_);    # TPL entry
     my $taxonName = shift(@_);
-    my $response = shift(@_);
+    my $response = "terse";
     my $query = $taxonName;
     $query =~ s/\s+$//;
     $query =~ s/^\s+//;
@@ -172,16 +240,12 @@ sub loadColData
     $fileName =~ s/\s/\_/g;
     $fileName =~ s/\_+$//;
     $fileName =~ s/\.$//;
-    my $dataFile = "CoL_DATA/$fileName.json";            
+    my $dataFile = "CoL_DATA/$fileName-$response.json";            
     
     print "\n\t\tRequesting taxon status from Catalouge of Life: ".colored($taxonName,'bold cyan on_black');    
     #print "\n\t\tData File: $dataFile\n";   
     
     my $json;
-
-    #
-    #    Data Retrieval: XML from file or URL
-    #
     
     if (-e $dataFile)
     {
@@ -204,28 +268,32 @@ sub loadColData
                 response   => $response
             }
         );        
-        if ($get->response->{error_message} ne "No names found")
+        if ($get->success && $get->response->{number_of_results_returned} > 0)
         {
             open my $df, ">", $dataFile or die "$dataFile $!";
-            my $combinedResults = [];
-            while ($get->response->{number_of_results_returned}+$get->response->{start} < $get->response->{total_number_of_results})
-            {
-                my $nextStart = $get->response->{number_of_results_returned}+$get->response->{start};
-                foreach my $item (@{$get->response->{results}})
+            
+            if ($get->response->{number_of_results_returned}+$get->response->{start} < $get->response->{total_number_of_results})
+            {            
+                my $combinedResults = [];
+                while ($get->response->{number_of_results_returned}+$get->response->{start} < $get->response->{total_number_of_results})
                 {
-                    push($combinedResults, $item); 
-                }               
-                $get = $wj->get(
-                    '/col/webservice',
+                    my $nextStart = $get->response->{number_of_results_returned}+$get->response->{start};
+                    foreach my $item (@{$get->response->{results}})
                     {
-                        name       => $query,
-                        format     => 'json',
-                        response   => $response,
-                        start      => $nextStart
-                    }
-                ); 
-            }
-            $get->response->{results} = $combinedResults;
+                        push($combinedResults, $item); 
+                    } 
+                    $get = $wj->get(
+                        '/col/webservice',
+                        {
+                            name       => $query,
+                            format     => 'json',
+                            response   => $response,
+                            start      => $nextStart
+                        }
+                    );                
+                }
+                $get->response->{results} = $combinedResults;
+            }            
             $json = $get->response;            
             print $df encode_json $get->response;
             print "Saved File $dataFile\n";
@@ -233,7 +301,7 @@ sub loadColData
     }
     return $json;
 }
-sub evaColStatus
+sub evaSimilarStatus
 {
     my $json = shift(@_);
     my $taxon = shift(@_);
@@ -241,17 +309,18 @@ sub evaColStatus
      
     my $duplicates = 0;
     my $status = "NA";
+    my $accepted = "NA";
     my $sourceId = "NA";
+    my $alternative = "";
     
     my $return;
-    
-    print "\n\t\t -| Evaluation of CoL Search Result ".scalar @{$json->{results}}."\n";
-    #print Dumper($json);
     
     my @hits = ();
     
     if (@{$json->{results}} > 0)
     {        
+        print "\n\t\t -| Evaluation of CoL Similar Search Result ".scalar @{$json->{results}}."\n";
+       
         foreach my $item (@{$json->{results}})
         {            
             #print Dumper($item);
@@ -265,13 +334,27 @@ sub evaColStatus
         }
         if (@hits > 1)
         {
-            $status = "Ambiguous";
-            $return = ({status => $status, sourceId => $sourceId, duplicates => scalar @hits});
+            $status = "Ambiguous (".scalar @hits.")";
+            my @allNames = getAllItemNames(@hits);
+            if (defined(@allNames))
+            {
+                $alternative = join(";", @allNames);
+            }
+            $return = ({status => $status, sourceId => $sourceId, duplicates => scalar @hits, accepted => $accepted, alternative => $alternative});
         } else
         {
             $status = $hits[0]->{name_status};
-            $sourceId = $hits[0]->{id};
-            $return = ({status => $status, sourceId => $sourceId, duplicates => scalar @hits});
+            $alternative = $hits[0]->{name};
+            if ($status eq "synonym")
+            { 
+                $accepted = $hits[0]->{accepted_name}{name};
+            } elsif ($status eq "accepted name")
+            {
+                $accepted = $hits[0]->{name};
+            }
+            $sourceId = $hits[0]->{id};            
+            $return = ({status => $status, sourceId => $sourceId, duplicates => scalar @hits, accepted => $accepted, alternative => $alternative});
+            
         }               
     }    
     return $return;
@@ -285,38 +368,58 @@ sub getSimilarNames
     
     my $newJson;
     
+    #if (@{$json} > 1)
     if (@{$json->{results}} > 1)
-    { 
-        $newJson->{id} = $json->{id};
-        $newJson->{name} = $newJson->{name};
-        $newJson->{total_number_of_results} = $newJson->{total_number_of_results};
-        $newJson->{number_of_results_returned} = $newJson->{number_of_results_returned};
-        $newJson->{start} = $newJson->{start};
-        $newJson->{error_message} = $newJson->{error_message};
-        $newJson->{version} = $newJson->{version};
-        $newJson->{rank} = $newJson->{rank};
-        $newJson->{results} = [];
-        
+    {        
+        my $newJsonItems = [];
         my $toi = join(" ", ($taxon->{genus},$taxon->{species},$taxon->{infraspecificEpithet}));
         $toi =~ s/\s+$//;
+        #foreach my $item (@{$json})
         foreach my $item (@{$json->{results}})
-        {
-            #print Dumper($item);
-            #<STDIN>;
+        { 
             if (defined($item->{rank}) && ($item->{rank} eq "Species" || $item->{rank} eq "Infraspecies"))
             {
-                my $alternative = join(" ", ($item->{genus}, $item->{species}, $item->{infraspecies}));
+                my $alternative = $item->{name};
                 $alternative =~ s/\s+$//;
                 my $curDist = distance($toi,$alternative);
-                print "\n\t\t\t $toi = $alternative : $curDist";
+                #print "\n\t\t\t $toi = $alternative : $curDist";
                 if ($curDist <= $maxLdist)
                 {
-                    push(@{$newJson->{results}}, $item);
+                    print "\n\t\t\t $toi = $alternative : $curDist";
+                    push($newJsonItems, $item);
                 }
             }
         }
+        print "\n\t\t\t";
+        if (@{$newJsonItems} > 0)
+        {
+            $newJson = $json;
+            $newJson->{results} = $newJsonItems;
+        }        
     }
     return $newJson;
+}
+sub colReCon
+{
+    my $tplEntry = shift(@_);    # TPL entry
+    my $taxonName = shift(@_);
+    my $maxLdist = shift(@_);   
+    my $source = "COL";    
+    my $result;
+    
+    my $colResult = colStatus($tplEntry, $taxonName);
+    if (defined($colResult))
+    {        
+        $result = ({status => $colResult->{status}, sourceId => $colResult->{sourceId}, source => $source, accepted => $colResult->{accepted}, alternative => $colResult->{alternative}});        
+    } else                     
+    {
+        my $colHierarchyResults = colHierarchy($tplEntry, $taxonName, $maxLdist);
+        if (defined($colHierarchyResults))
+        {           
+           $result = ({status => $colHierarchyResults->{status}, sourceId => $colHierarchyResults->{sourceId}, source => $source, accepted => $colHierarchyResults->{accepted}, alternative => $colHierarchyResults->{alternative}});
+        }      
+    }
+    return $result;
 }
 sub colHierarchy
 {
@@ -324,33 +427,127 @@ sub colHierarchy
     my $taxonName = shift(@_);
     my $maxLdist = shift(@_);
     
-    my $status = "NA";
-    my $sourceId = "NA";
+    my $accepted = "NA";
     
     my $json;
+    my $return;
     
     if ($taxon->{infraspecificRank} ne "")
     {
         my $species = join(" ", ($taxon->{genus}, $taxon->{species}));
-        $json = loadColData($taxon, $species, "full");
+        $json = loadColData($taxon, $species);
     } else
     {        
-        $json = loadColData($taxon, $taxon->{genus}, "full");
+        $json = loadColData($taxon, $taxon->{genus});
     }
     
     if (defined($json))
-    {
-        my $newJson = getSimilarNames($json, $taxon, $taxonName, $maxLdist);
-        #<STDIN>;
-        my $successEva = evaColStatus($newJson, $taxon, $taxonName);
-        $status = $successEva->{status};
-        $sourceId = $successEva->{sourceId};
-        #$duplicates = $successEva->{duplicates};
-        print "\n\t\t -| Name with status ".colored($status,'bold yellow on_black')." found\n";            
+    {         
+        my $newJson = getSimilarNames($json, $taxon, $taxonName, $maxLdist);            
+        if (defined($newJson))
+        {
+            my $successEva = evaSimilarStatus($newJson, $taxon, $taxonName);
+            if (defined($successEva))
+            {                    
+                $return = ({ status => $successEva->{status}, sourceId => $successEva->{sourceId}, accepted => $successEva->{accepted}, alternative => $successEva->{alternative}});
+            }
+        }       
     }   
-    return ({ status => $status, sourceId => $sourceId});
+    return $return;
     
     
+}
+sub isInfraSpec
+{
+    my $taxon = shift(@_);
+    my $item = shift(@_);
+    my @itemNameSplit = split(" ", $item->{name});
+    #print Dumper($item);
+    #<STDIN>;
+    my $itemInfraEpithet = pop(@itemNameSplit);
+    if ($taxon->{species} eq $itemInfraEpithet)
+    {
+        return 1;
+    } else
+    {
+        return 0;
+    }
+}
+sub getAllItemNames
+{    
+    my @names;
+    foreach my $item (@_)
+    {
+        push(@names, $item->{name});
+    }
+    return @names;
+}
+sub evaColStatus
+{
+    my $json = shift(@_);
+    my $taxon = shift(@_);
+    my $taxonName = shift(@_);
+         
+    my $status = "NA";
+    my $sourceId = "NA";
+    my $accepted = "NA";
+    my $alternative = "";
+    
+    my $return;        
+    
+    my @hits = ();
+    
+    if (@{$json->{results}} > 0)
+    {        
+        print "\n\t\t -| Evaluation of CoL Search Result ".scalar @{$json->{results}}."\n";
+        my $hasGoodHit = 0;
+        foreach my $item (@{$json->{results}})
+        {                        
+            if ($item->{rank} eq "Infraspecies" && $taxon->{infraspecificRank} ne "")
+            {
+                push(@hits, $item);
+                
+            } elsif ($item->{rank} eq "Species" && $taxon->{infraspecificRank} eq "")
+            {
+                push(@hits, $item);
+                $hasGoodHit++;   # we asume that if we are looking for a species they will be first in the result-list 
+            } elsif ($item->{rank} eq "Infraspecies" && $taxon->{infraspecificRank} eq "" && $hasGoodHit < 1)
+            {
+                # check if species name is really a infraspecific name
+                if (isInfraSpec($taxon, $item) == 1)
+                {
+                    push(@hits, $item);
+                }
+            }
+        }
+        if (@hits > 1)
+        {
+            $status = "Ambiguous (".scalar @hits.")";
+            my @allNames = getAllItemNames(@hits);
+            if (defined(@allNames))
+            {
+                $alternative = join(";", @allNames);
+            }
+            $return = ({status => $status, sourceId => $sourceId, duplicates => scalar @hits, alternative => $alternative, accepted => $accepted});
+        } else
+        {
+            $status = $hits[0]->{name_status};
+            #print Dumper($hits[0]);
+            if ($status eq "synonym")
+            {
+                $accepted = $hits[0]->{accepted_name}{name};
+                #print "---".$hits[0]->{accepted_name}{name};
+            } elsif ($status eq "accepted name" || $status eq "provisionally accepted name")
+            {
+                $accepted = $hits[0]->{name};
+                #print "---".$hits[0]->{name};
+            }
+            #<STDIN>;
+            $sourceId = $hits[0]->{id};
+            $return = ({status => $status, sourceId => $sourceId, duplicates => scalar @hits, alternative => $alternative, accepted => $accepted});
+        }               
+    }    
+    return $return;
 }
 sub colStatus 
 {
@@ -361,32 +558,21 @@ sub colStatus
     my $taxon = shift(@_);    # TPL entry
     my $taxonName = shift(@_);
     
-    my $duplicates = 0;
-    my $status = "NA";
-    my $sourceId = "NA";
     my $return;
     
-    my $json = loadColData($taxon, $taxonName, "full");
+    my $json = loadColData($taxon, $taxonName);
     my @notes;
-    
-    #
-    #    Data Evaluation
-    #
 
     if (defined($json))
     {                  
         my $successEva = evaColStatus($json, $taxon, $taxonName);
         if (defined($successEva))
-        {
-            $status = $successEva->{status};
-            $sourceId = $successEva->{sourceId};
-            $duplicates = $successEva->{duplicates};
-            # print "\n\t\t -| Name with status ".colored($status,'bold yellow on_black')." found\n";
-            if ($duplicates > 0)
+        {            
+            if ($successEva->{duplicates} > 0)
             { 
-                push(@notes, "$duplicates x duplicate(s)");
+                push(@notes, $successEva->{duplicates}." x duplicate(s)");
             }
-            $return = ({ status => $status, sourceId => $sourceId, notes => join(",",@notes)});
+            $return = ({ status => $successEva->{status}, sourceId => $successEva->{sourceId}, notes => join(",",@notes), alternative => $successEva->{alternative}, accepted => $successEva->{accepted}});
         }
     }       
     return $return;

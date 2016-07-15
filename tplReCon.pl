@@ -46,7 +46,9 @@ my $dsn = "DBI:mysql:database=".$config{database}{dbname}.";host=".$config{datab
 my $dbh = DBI->connect($dsn, $config{database}{user}, $config{database}{dbpass});
 #               prepare db querries
 my $searchQuery = $dbh->prepare_cached("SELECT * FROM tpldata where genusHybridMarker = '' and genus = ? and species = ? and speciesHybridMarker = ? and infraspecificRank = ? and infraspecificEpithet = ? order by status");
-my $infraSearchQuery = $dbh->prepare_cached("SELECT * FROM tpldata where genusHybridMarker = '' and genus = ? and species = ? and infraspecificRank != ''");
+my $infraSpecificQuery = $dbh->prepare_cached("SELECT * FROM tpldata where genusHybridMarker = '' and genus = ? and species = ? and infraspecificRank != ''");
+my $infraGenericQuery = $dbh->prepare_cached("SELECT * FROM tpldata where genusHybridMarker = '' and genus = ? and infraspecificRank = ''");
+my $byIdQuery = $dbh->prepare_cached("SELECT * FROM tpldata where tplId = ?");
 
 #
 #       Output: Preparations
@@ -62,7 +64,7 @@ $csv->eol ("\n");
 #       Output (CSV): Taxonomic Status Overview
 #
 my $outFile = $testFile."_TPL_NameCheck.csv";
-my @csv_header = ("Family","Genus","Taxon","Alternative","Source","SourceId","Status","Additionals");
+my @csv_header = ("Family","Genus","Taxon","Alternative","Source","SourceId","Status","Accepted","Additionals");
 my $csvHeaderRef = \@csv_header;
 open my $fh, ">:encoding(utf8)", $outFile or die "$outFile $!";
 $csv->print ($fh, $csvHeaderRef);
@@ -83,9 +85,11 @@ my %tax;
 while (my $line = <$data2>) {
      
   $tax{"Source"} = "TPL";
-  $tax{"SourceId"} = 0;
+  $tax{"SourceId"} = "NA";
   $tax{"Status"} = "NA";
+  $tax{"Accepted"} = "NA";
   $tax{"Alternative"} = "";
+  
     
   chomp $line;
   $line =~ s/^\s+//;
@@ -117,12 +121,21 @@ while (my $line = <$data2>) {
       {         
          my $ref = $searchQuery->fetchrow_hashref();
          $tax{"Status"} = $ref->{status};         
-         print colored($ref->{status}, 'bold yellow on_black')." | ";
-         if ($ref->{status} eq "Synonym")
+         print colored($ref->{status}, 'bold yellow on_black');
+         if ($ref->{status} eq "Synonym" || $ref->{status} eq "Misapplied")
          {
-            $tax{"SourceId"} = $ref->{acceptedId};
+            $tax{"SourceId"} = $ref->{tplId};
+            my $tplAccepted = getTPLaccepted($ref->{acceptedId}, $byIdQuery);
+            if (defined($tplAccepted))
+            {
+               $tax{"Accepted"} = $tplAccepted;               
+            }
          } else {
             $tax{"SourceId"} = $ref->{tplId};
+            if ($ref->{status} eq "Accepted")
+            {
+               $tax{"Accepted"} = $taxon;
+            }
          }         
       } else {
          if ($searchQuery->rows > 1)
@@ -130,89 +143,78 @@ while (my $line = <$data2>) {
             my $multiCheck = evaluateMultiExactHits($searchQuery);
             $tax{"Status"} = $multiCheck->{status};
             $tax{"SourceId"} = $multiCheck->{tplId};
+            $tax{"Alternative"} = $multiCheck->{alternative};
             %ambNames = %{$multiCheck->{ambNames}};
-            print colored($tax{"Status"}, 'bold yellow on_black')." | ";
+            print colored($tax{"Status"}, 'bold yellow on_black');
          } else
          {        
-            # if no match was found...
+            # if no match was found using TPL exact match search...
             #
             # evaluate all infraspecific names if supplied name has infraspecific rank
             if ($tplEntry->{infraspecificRank} ne "")
             {
                # check infraspecific entities
-               $infraSearchQuery->execute($tplEntry->{genus}, $tplEntry->{species});
-               if ($infraSearchQuery->rows > 0)
-               {
-                  my $hierarchyResult = evaluateHierarchy($taxon, $infraSearchQuery, $config{maxldist});
-                  if ($hierarchyResult->{result} > 0)
+               $infraSpecificQuery->execute($tplEntry->{genus}, $tplEntry->{species});
+               if ($infraSpecificQuery->rows > 0)
+               {                                
+                  my $hierarchyResult = evaluateHierarchy($taxon, $infraSpecificQuery, $config{maxldist}, $byIdQuery);
+                  if (defined($hierarchyResult))
                   {
                      $tax{"Status"} = $hierarchyResult->{status};
+                     $tax{"Accepted"} = $hierarchyResult->{accepted};
                      $tax{"SourceId"} = $hierarchyResult->{tplId};
                      $tax{"Alternative"} = $hierarchyResult->{alternative};
                      print colored($tax{"Status"}, 'bold cyan on_black')." | ".$tax{"Alternative"};
                   } else
                   {
                      print colored("NA (TPL)", 'bold red on_black');
-                     my $colResult = colStatus($tplEntry, $taxon);
-                     if (defined($colResult))
+                     my $colReConResult = colReCon($tplEntry, $taxon, $config{maxldist});
+                     
+                     if (defined($colReConResult))
                      {
-                        $tax{"Status"} = $colResult->{status};
-                        $tax{"SourceId"} = $colResult->{sourceId};
-                        $tax{"Source"} = "COL";
+                        $tax{"Status"} = $colReConResult->{status};
+                        $tax{"Accepted"} = $colReConResult->{accepted};
+                        $tax{"Alternative"} = $colReConResult->{alternative};
+                        $tax{"SourceId"} = $colReConResult->{sourceId};
+                        $tax{"Source"} = $colReConResult->{source};
                         print colored($tax{"Status"}." (COL)", 'bold cyan on_black');
                      } else                     
-                     {
-                        my $colHierarchyResults = colHierarchy($tplEntry, $taxon, $config{maxldist});
-                        if ($colHierarchyResults->{status} ne "NA")
-                        {
-                           $tax{"Status"} = $colHierarchyResults->{status};
-                           $tax{"SourceId"} = $colHierarchyResults->{sourceId};
-                           $tax{"Source"} = "COL";
-                           print colored($tax{"Status"}." (COL)", 'bold cyan on_black');
-                        } else                     
-                        {                                                      
-                           print colored("NA (COL)", 'bold red on_black');
-                        }                        
+                     {                                                                
+                        print colored("NA (COL)", 'bold red on_black');
                      }
                   }
                } else
                {
-                  print colored("NA (TPL)", 'bold red on_black');
-                  my $colResult = colStatus($tplEntry, $taxon);
-                  if (defined($colResult))
-                  {
-                     $tax{"Status"} = $colResult->{status};
-                     $tax{"SourceId"} = $colResult->{sourceId};
-                     $tax{"Source"} = "COL";
-                     print colored($tax{"Status"}." (COL)", 'bold cyan on_black');
-                  } else                     
-                  {
-                     my $colHierarchyResults = colHierarchy($tplEntry, $taxon, $config{maxldist});
-                     if ($colHierarchyResults->{status} ne "NA")
+                     print colored("NA (TPL)", 'bold red on_black');
+                     my $colReConResult = colReCon($tplEntry, $taxon, $config{maxldist});
+                     
+                     if (defined($colReConResult))
                      {
-                        $tax{"Status"} = $colHierarchyResults->{status};
-                        $tax{"SourceId"} = $colHierarchyResults->{sourceId};
-                        $tax{"Source"} = "COL";
+                        $tax{"Status"} = $colReConResult->{status};
+                        $tax{"Accepted"} = $colReConResult->{accepted};
+                        $tax{"Alternative"} = $colReConResult->{alternative};
+                        $tax{"SourceId"} = $colReConResult->{sourceId};
+                        $tax{"Source"} = $colReConResult->{source};
                         print colored($tax{"Status"}." (COL)", 'bold cyan on_black');
                      } else                     
-                     {                                                      
+                     {                                                                
                         print colored("NA (COL)", 'bold red on_black');
-                     }        
-                  }                  
+                     }                 
                }
             } else 
             {
                # check speciesHybridMarker
+               my $hybridAlternative;
                if ($tplEntry->{speciesHybridMarker} eq "")
                {
                   # check if name exists with speciesHybridMarker
                   $searchQuery->execute($tplEntry->{genus}, $tplEntry->{species}, "x", $tplEntry->{infraspecificRank}, $tplEntry->{infraspecificEpithet});
-                  $tax{"Alternative"} = join(" ", ($tplEntry->{genus}, "x", $tplEntry->{species}));
+                  $hybridAlternative = join(" ", ($tplEntry->{genus}, "x", $tplEntry->{species}));
                } elsif ($tplEntry->{speciesHybridMarker} eq "x")
                {
                   # check if name exists without speciesHybridMarker
                   $searchQuery->execute($tplEntry->{genus}, $tplEntry->{species}, "", $tplEntry->{infraspecificRank}, $tplEntry->{infraspecificEpithet});
-                  $tax{"Alternative"} = join(" ", ($tplEntry->{genus}, $tplEntry->{species}));
+                  $hybridAlternative = join(" ", ($tplEntry->{genus}, $tplEntry->{species}));
                }
                if ($searchQuery->rows > 0)
                {
@@ -220,89 +222,86 @@ while (my $line = <$data2>) {
                      {         
                         my $ref = $searchQuery->fetchrow_hashref();
                         $tax{"Status"} = $ref->{status};         
-                        print colored($tax{"Status"}, 'bold cyan on_black')." | ".$tax{"Alternative"};
-                        if ($ref->{status} eq "Synonym")
+                        $tax{"Alternative"} = $hybridAlternative;
+                        print colored($tax{"Status"}, 'bold cyan on_black')." | ".$hybridAlternative;
+                        if ($ref->{status} eq "Synonym" || $ref->{status} eq "Misapplied")
                         {
-                           $tax{"SourceId"} = $ref->{acceptedId};
+                           $tax{"SourceId"} = $ref->{tplId};
+                           my $tplAccepted = getTPLaccepted($ref->{acceptedId}, $byIdQuery);
+                           if (defined($tplAccepted))
+                           {
+                              $tax{"Accepted"} = $tplAccepted;               
+                           }
                         } else {
                            $tax{"SourceId"} = $ref->{tplId};
+                           if ($ref->{status} eq "Accepted")
+                           {
+                              $tax{"Accepted"} = $taxon;
+                           }
                         }         
                      } else {
                         my $multiCheck = evaluateMultiExactHits($searchQuery);
                         $tax{"Status"} = $multiCheck->{status};
                         $tax{"SourceId"} = $multiCheck->{tplId};
-                        %ambNames = %{$multiCheck->{ambNames}};
-                        print colored($tax{"Status"}, 'bold cyan on_black')." | ".$tax{"Alternative"};
+                        $tax{"Alternative"} = $multiCheck->{alternative};                        
+                        print colored($tax{"Status"}, 'bold cyan on_black');
                      }
                } else
                {
                   # check infrageneric entities
-                  $infraSearchQuery->execute($tplEntry->{genus}, "%");
-                  if ($infraSearchQuery->rows > 0)
+                  $infraGenericQuery->execute($tplEntry->{genus});                  
+                  if ($infraGenericQuery->rows > 0)
                   {
-                     my $hierarchyResult = evaluateHierarchy($taxon, $infraSearchQuery, $config{maxldist});
-                     if ($hierarchyResult->{result} > 0)
+                     my $hierarchyResult = evaluateHierarchy($taxon, $infraGenericQuery, $config{maxldist}, $byIdQuery);
+                     if (defined($hierarchyResult))
                      {
                         $tax{"Status"} = $hierarchyResult->{status};
+                        $tax{"Accepted"} = $hierarchyResult->{accepted};
                         $tax{"SourceId"} = $hierarchyResult->{tplId};
                         $tax{"Alternative"} = $hierarchyResult->{alternative};
                         print colored($tax{"Status"}, 'bold cyan on_black')." | ".$tax{"Alternative"};
                      } else
                      {
                         print colored("NA (TPL)", 'bold red on_black');
-                        my $colResult = colStatus($tplEntry, $taxon);
-                        if (defined($colResult))
+                        my $colReConResult = colReCon($tplEntry, $taxon, $config{maxldist});
+                        
+                        if (defined($colReConResult))
                         {
-                           $tax{"Status"} = $colResult->{status};
-                           $tax{"SourceId"} = $colResult->{sourceId};
-                           $tax{"Source"} = "COL";
+                           $tax{"Status"} = $colReConResult->{status};
+                           $tax{"Accepted"} = $colReConResult->{accepted};
+                           $tax{"Alternative"} = $colReConResult->{alternative};
+                           $tax{"SourceId"} = $colReConResult->{sourceId};
+                           $tax{"Source"} = $colReConResult->{source};
                            print colored($tax{"Status"}." (COL)", 'bold cyan on_black');
                         } else                     
-                        {
-                           my $colHierarchyResults = colHierarchy($tplEntry, $taxon, $config{maxldist});
-                           if ($colHierarchyResults->{status} ne "NA")
-                           {
-                              $tax{"Status"} = $colHierarchyResults->{status};
-                              $tax{"SourceId"} = $colHierarchyResults->{sourceId};
-                              $tax{"Source"} = "COL";
-                              print colored($tax{"Status"}." (COL)", 'bold cyan on_black');
-                           } else                     
-                           {                                                      
-                              print colored("NA (COL)", 'bold red on_black');
-                           }        
+                        {                                                                
+                           print colored("NA (COL)", 'bold red on_black');
                         }
                      }
                   } else
                   {
                      print colored("NA (TPL)", 'bold red on_black');
-                     my $colResult = colStatus($tplEntry, $taxon);
-                     if (defined($colResult))
+                     my $colReConResult = colReCon($tplEntry, $taxon, $config{maxldist});
+                     
+                     if (defined($colReConResult))
                      {
-                        $tax{"Status"} = $colResult->{status};
-                        $tax{"SourceId"} = $colResult->{sourceId};
-                        $tax{"Source"} = "COL";
+                        $tax{"Status"} = $colReConResult->{status};
+                        $tax{"Accepted"} = $colReConResult->{accepted};
+                        $tax{"Alternative"} = $colReConResult->{alternative};
+                        $tax{"SourceId"} = $colReConResult->{sourceId};
+                        $tax{"Source"} = $colReConResult->{source};
                         print colored($tax{"Status"}." (COL)", 'bold cyan on_black');
                      } else                     
-                     {
-                        my $colHierarchyResults = colHierarchy($tplEntry, $taxon, $config{maxldist});
-                        if ($colHierarchyResults->{status} ne "NA")
-                        {
-                           $tax{"Status"} = $colHierarchyResults->{status};
-                           $tax{"SourceId"} = $colHierarchyResults->{sourceId};
-                           $tax{"Source"} = "COL";
-                           print colored($tax{"Status"}." (COL)", 'bold cyan on_black');
-                        } else                     
-                        {                                                      
-                           print colored("NA (COL)", 'bold red on_black');
-                        }        
-                     }
+                     {                                                                
+                        print colored("NA (COL)", 'bold red on_black');
+                     }                             
                   }
                }
             }                        
          }
       }
       print "\n";
-      my @columns = ($family,$tplEntry->{genus},$taxon,$tax{"Alternative"},$tax{"Source"},$tax{"SourceId"},$tax{"Status"});
+      my @columns = ($family,$tplEntry->{genus},$taxon,$tax{"Alternative"},$tax{"Source"},$tax{"SourceId"},$tax{"Status"},$tax{"Accepted"});
       push(@columns, @lineSplits);
       $csv->print ($fh, \@columns);
       if (@{$ambNames{Accepted}} > 0 || @{$ambNames{Synonym}} > 0 || @{$ambNames{Unresolved}} > 0 || @{$ambNames{Misapplied}} > 0)
