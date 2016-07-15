@@ -8,10 +8,10 @@ use Text::Levenshtein qw(distance);
 our @ISA= qw( Exporter );
 
 # these CAN be exported.
-our @EXPORT_OK = qw( evaluateMultiExactHits evaluateHierarchy buildTPLentry buildTaxonName);
+our @EXPORT_OK = qw( evaluateMultiExactHits evaluateHierarchy buildTPLentry buildTaxonName getTPLaccepted);
 
 # these are exported by default.
-our @EXPORT = qw( evaluateMultiExactHits evaluateHierarchy buildTPLentry buildTaxonName);
+our @EXPORT = qw( evaluateMultiExactHits evaluateHierarchy buildTPLentry buildTaxonName getTPLaccepted);
 
 sub buildTaxonName {
 	my $row_hashref = shift(@_);
@@ -76,59 +76,86 @@ sub buildTPLentry {
          	die("Error: buildTPLentry failed!");
          }
 }
-sub evaluateMultiExactHits {	
+sub getTPLaccepted
+{
+	my $acceptedId = shift(@_);	
+	my $query = shift(@_);
+	my $accepted;
+	$query->execute($acceptedId);	
+	if ($query->rows > 0)
+	{
+		  my $ref = $query->fetchrow_hashref();
+		  $accepted = buildTaxonName($ref);
+	}		
+	return $accepted;
+}
+sub evaluateMultiExactHits 
+{	
 	my $queryResult = shift(@_);
-	my %stati;
-	my $alternative;
-	my $tplId = "";
-	my @synTplIds = ();
+	
+	my $taxonName;
+	my $tplId = "NA";
+	my $status = "NA";
+	my $alternative = "";
+	
+	my %ambNames;
+
+	$ambNames{Accepted} = [ () ];
+	$ambNames{Synonym} = [ () ];
+	$ambNames{Unresolved} = [ () ];
+	$ambNames{Misapplied} = [ () ];
+	
+	my %ambIds;
+	
+	$ambIds{Accepted} = [ () ];
+	$ambIds{Synonym} = [ () ];
+	$ambIds{Unresolved} = [ () ];
+	$ambIds{Misapplied} = [ () ];
 	
 	while (my $dbRow = $queryResult->fetchrow_hashref())
 	{
-		unless (defined($alternative))
+		push($ambNames{$dbRow->{status}}, buildTaxonName($dbRow,1));
+		push($ambIds{$dbRow->{status}}, $dbRow->{tplId});		
+		unless (defined($taxonName))
 		{
-			$alternative = buildTaxonName($dbRow);
-		}
-		$stati{$dbRow->{status}} = 1;
-		if ($dbRow->{status} eq "Accepted") # || $dbRow->{status} eq "Unresolved")
-		{
-			$tplId = $dbRow->{tplId};
-		} elsif ($dbRow->{status} eq "Synonym" || $dbRow->{status} eq "Misapplied")
-		{
-			push(@synTplIds,$dbRow->{acceptedIds});
+			$taxonName = buildTaxonName($dbRow);
 		}
 	}
-	
-	if ((keys %stati) > 1)
+	if (@{$ambIds{Accepted}} == 1)
 	{
-		# more than one status type => ambiguous status
-		# if an accepted name is included return its ID
-		return ($alternative, "Ambiguous", $tplId);
-	} elsif ((keys %stati) > 0)
-	{
-		my @status = keys %stati;
-		if ($status[0] eq "Synonym")
-		{
-			$tplId = join("|",@synTplIds);
-		}
-		return ($alternative, $status[0], $tplId);
+		$tplId = @{$ambIds{Accepted}}[0];
 	}
+	if ( @{$ambIds{Accepted}}+@{$ambIds{Synonym}}+@{$ambIds{Unresolved}}+@{$ambIds{Misapplied}} > 1 )
+	{
+		$status = "Ambiguous (".scalar @{$ambIds{Accepted}}+@{$ambIds{Synonym}}+@{$ambIds{Unresolved}}+@{$ambIds{Misapplied}}.")";
+		$alternative = join(";", (@{$ambNames{Accepted}},@{$ambNames{Synonym}},@{$ambNames{Unresolved}},@{$ambNames{Misapplied}}));
+		$alternative =~ s/\;\;/\;/g;
+	}
+	return ({taxonName => $taxonName, status => $status, tplId => $tplId, alternative => $alternative, ambNames => \%ambNames});
 }
 sub evaluateHierarchy {
-	my $taxon = shift(@_);
-	my $queryResult = shift(@_);
+	my $taxon = shift(@_);			# searchterm
+	my $queryResult = shift(@_);		# db entries
+	my $maxLdist = shift(@_);		# maximum levenshtein distance
+	my $byIdQuery = shift(@_);
 	my @closeMatches;		             
-	my %tax;
+	
+	my $alternative;
+	my $sourceId = "NA";
+	my $status;	
+	my $accepted = "NA";
+	my $result;
 	
 	while (my $dbRow = $queryResult->fetchrow_hashref())
 	{
+	   # a potential alternative name
 	   my $testAlternative = join(" ", ($dbRow->{genus},$dbRow->{species},$dbRow->{infraspecificRank},$dbRow->{infraspecificEpithet}));               
 	   $testAlternative =~ s/\s+$//;
 	   
 	   my $curAccId;
 	   if ($dbRow->{status} eq "Synonym" || $dbRow->{status} eq "Misapplied")
 	   {
-		$curAccId = $dbRow->{acceptedId};
+		   $curAccId = $dbRow->{acceptedId};
 	   } else
 	   {
 	    	$curAccId = $dbRow->{tplId};
@@ -137,29 +164,32 @@ sub evaluateHierarchy {
 	   my $curDist;
 	   if ($taxon =~ /subsp\.|var\.|f\./)
 	   {
-		my $rRtaxon = $taxon;
-		$rRtaxon =~ s/\ssubsp\.|\svar\.|\sf\.//;
-		my $rRtestAlternative = $testAlternative;
-		$rRtestAlternative =~ s/\ssubsp\.|\svar\.|\sf\.//;			
-		$curDist = distance($rRtestAlternative,$rRtaxon);
+	   	# searchterm: remove infra specific rank name before distance measurement
+		  my $rRtaxon = $taxon;
+		  $rRtaxon =~ s/\ssubsp\.|\svar\.|\sf\.//;
+		  # potential alternative name: remove infra specific rank name before distance measurement
+		  my $rRtestAlternative = $testAlternative;
+		  $rRtestAlternative =~ s/\ssubsp\.|\svar\.|\sf\.//;
+		  $curDist = distance($rRtestAlternative,$rRtaxon);
 	   } else
 	   {
-		$curDist = distance($testAlternative,$taxon);
+		  $curDist = distance($testAlternative,$taxon);
 	   }
 	   	   
-	   if ($curDist < 3)
+	   if ($curDist <= $maxLdist)
 	   {                  			
-		push(@closeMatches, { tplId => $dbRow->{tplId}, taxon => $testAlternative, distance => $curDist, status => $dbRow->{status}, accId => $curAccId, data => $dbRow });
-		print colored("\n\t\t -| $taxon =?= $testAlternative ($curDist)",'bold yellow on_black');
+		  push(@closeMatches, { tplId => $dbRow->{tplId}, taxon => $testAlternative, distance => $curDist, status => $dbRow->{status}, accId => $curAccId, data => $dbRow });
+		  print colored("\n\t\t -| $taxon =?= $testAlternative ($curDist)",'bold yellow on_black');
 	   } else
 	   {
-		#print colored("\n\t\t -| $taxon =?= $testAlternative ($curDist)",'bold red on_black');
+		  #print colored("\n\t\t -| $taxon =?= $testAlternative ($curDist)",'bold red on_black');
 	   }
 	}
 	print "\n";
 	
 	if (@closeMatches > 0)
 	{
+		# sort alternative names by distance
 		my @sorted = sort { $a->{distance} <=> $b->{distance} } @closeMatches;
 		my @altNames;
 		my %uniqueAltNames;
@@ -176,30 +206,51 @@ sub evaluateHierarchy {
 		# if there is more than one alternative...
 		if (@sorted > 1)
 		{
-			# if the closest match (first element) is a perfect match OR if the closest match has distance 1 and any other match is more distant (=2)...
+			# if the closest match (first element) is a perfect match OR 
+			# if the closest match has distance 1 and any other match is more distant...
 			if ($sorted[0]->{distance} == 0 || ($sorted[0]->{distance} == 1 && $sorted[1]->{distance} > 1))
 			{
-				$tax{"Alternative"} = $sorted[0]->{taxon};
-				$tax{"Status"} = $sorted[0]->{status};
-				$tax{"SourceId"} = $sorted[0]->{accId};
+				$alternative = $sorted[0]->{taxon};
+				$status = $sorted[0]->{status};
+				$sourceId = $sorted[0]->{tplId};
+				my $acceptedName = getTPLaccepted($sorted[0]->{accId}, $byIdQuery);
+				if (defined($acceptedName))
+				{
+					 $accepted = $acceptedName;
+				} else
+				{
+					 if ($status eq "Accepted")
+					 {
+						$accepted = $sorted[0]->{taxon};
+					 }
+				}
 			# in any other case, we count the result as ambiguous...
 			} else
 			{
-				$tax{"Status"} = "Ambiguous (".scalar(@altNames).")";
-				$tax{"Alternative"} = join(",",@altNames);
+				$status = "Ambiguous (".scalar(@altNames).")";
+				$alternative = join(",",@altNames);
 			}
 		# if there is exactly one alternative...
 		} else
 		{
-			$tax{"Alternative"} = $sorted[0]->{taxon};
-			$tax{"Status"} = $sorted[0]->{status};
-			$tax{"SourceId"} = $sorted[0]->{accId};      
+			$alternative = $sorted[0]->{taxon};
+			$status = $sorted[0]->{status};
+			$sourceId = $sorted[0]->{tplId};
+			my $acceptedName = getTPLaccepted($sorted[0]->{accId}, $byIdQuery);
+			if (defined($acceptedName))
+			{
+				$accepted = $acceptedName;
+			} else
+			{
+				if ($status eq "Accepted")
+				{
+					 $accepted = $sorted[0]->{taxon};
+				}
+			}
 		}    
-		return ($tax{"Alternative"}, $tax{"SourceId"}, $tax{"Status"});
-	} else
-	{
-		return ();
+		$result = ({alternative => $alternative, tplId => $sourceId, status => $status, accepted => $accepted});
 	}
+	return $result;
 }
 
 1;
