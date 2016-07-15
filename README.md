@@ -2,10 +2,7 @@
 Uses "The Plant List" (TPL, primary) and the "Catalogue Of Life" (COL, secondary) for taxonomic status reconciliation.
 
 # The Plant List mySQL dump
-TPL mySQL database as used in http://bdj.pensoft.net/articles.php?id=7971
-tpldata_live110716.zip.001
-tpldata_live110716.zip.002
-tpldata_live110716.zip.003
+TPL mySQL database as used in http://bdj.pensoft.net/articles.php?id=7971: tpldata_live110716.zip.001, tpldata_live110716.zip.002, tpldata_live110716.zip.003.
 
 # Tpl.pm & Col.pm
 TPL and COL specific collection of reusable functions
