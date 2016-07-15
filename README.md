@@ -14,7 +14,7 @@ TPL and COL specific collection of reusable functions
   Input: CSV-file (using ";" as field separator)
     First Column = Family name, Second Column = Taxon name.
     Information stored in additional columns will be appended to the results in Output 1.
-  Usage: tplNameCheck.pl "directory/CSV-file.csv". 
+  Usage: tplReCon.pl "directory/CSV-input-file".
     Output files will be stored in the directory of the input file.
 
 # Output 1
